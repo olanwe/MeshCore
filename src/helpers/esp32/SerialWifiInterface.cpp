@@ -133,6 +133,7 @@ void SerialWifiInterface::checkWifiStatus() {
 
   unsigned long now = millis();
 
+  // Hard reset is split across loop iterations so LoRa/Mesh processing is not blocked.
   if (_wifi_reset_in_progress) {
     if (now < _wifi_reset_restart_time) return;
 
@@ -149,20 +150,12 @@ void SerialWifiInterface::checkWifiStatus() {
   if (!saw_event && _wifi_issue_since == 0 && !do_sanity_check) return;
   if (do_sanity_check) _last_wifi_check = now;
 
-  if (_wifi_got_ip && isWifiReady()) {
-    WIFI_DEBUG_PRINTLN("SerialWifiInterface -> WiFi got IP");
-    _wifi_ready = true;
-    _wifi_got_ip = false;
-    _wifi_disconnected = false;
-    _wifi_lost_ip = false;
-    _wifi_issue_since = 0;
-    _wifi_reconnect_done = false;
-    _wifi_hard_reset_done = false;
-    startServer();
-    return;
-  }
+  bool wifi_ready = isWifiReady();
 
-  if (isWifiReady()) {
+  if (wifi_ready) {
+    if (_wifi_got_ip) {
+      WIFI_DEBUG_PRINTLN("SerialWifiInterface -> WiFi got IP");
+    }
     _wifi_ready = true;
     _wifi_disconnected = false;
     _wifi_lost_ip = false;
@@ -171,27 +164,27 @@ void SerialWifiInterface::checkWifiStatus() {
     _wifi_reconnect_done = false;
     _wifi_hard_reset_done = false;
     startServer();
-    return;
-  }
+  } else {
+    if (_wifi_issue_since == 0) {
+      _wifi_issue_since = now;
+      WIFI_DEBUG_PRINTLN("SerialWifiInterface -> WiFi unavailable");
+    }
 
-  if (_wifi_issue_since == 0) {
-    _wifi_issue_since = now;
-    WIFI_DEBUG_PRINTLN("SerialWifiInterface -> WiFi unavailable");
-  }
+    // IP loss invalidates the active TCP client/server sockets.
+    _wifi_ready = false;
+    stopClient();
+    stopServer();
 
-  _wifi_ready = false;
-  stopClient();
-  stopServer();
+    if (!_wifi_reconnect_done && now >= _wifi_issue_since + WIFI_RECOVERY_SOFT_RECONNECT_DELAY) {
+      reconnectWifi();
+      _wifi_reconnect_done = true;
+    }
 
-  if (!_wifi_reconnect_done && now >= _wifi_issue_since + WIFI_RECOVERY_SOFT_RECONNECT_DELAY) {
-    reconnectWifi();
-    _wifi_reconnect_done = true;
-  }
-
-  if (now >= _wifi_issue_since + WIFI_RECOVERY_HARD_RESET_DELAY
-      && (!_wifi_hard_reset_done || now >= _last_hard_reset + WIFI_RECOVERY_HARD_RESET_INTERVAL)) {
-    resetWifi();
-    _wifi_hard_reset_done = true;
+    if (now >= _wifi_issue_since + WIFI_RECOVERY_HARD_RESET_DELAY
+        && (!_wifi_hard_reset_done || now >= _last_hard_reset + WIFI_RECOVERY_HARD_RESET_INTERVAL)) {
+      resetWifi();
+      _wifi_hard_reset_done = true;
+    }
   }
 }
 

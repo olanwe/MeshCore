@@ -30,10 +30,11 @@ void SerialWifiInterface::begin(int port, const char* ssid, const char* password
   _ssid = ssid;
   _password = password;
   _managed_wifi = true;
+  _wifi_ready = false;
   _wifi_disconnected = false;
   _wifi_lost_ip = false;
   _wifi_got_ip = false;
-  _last_wifi_event = 0;
+  _last_wifi_check = millis() - WIFI_RECOVERY_SANITY_CHECK_INTERVAL;
   _wifi_issue_since = 0;
   _wifi_reconnect_done = false;
   _wifi_hard_reset_done = false;
@@ -50,14 +51,12 @@ void SerialWifiInterface::begin(int port, const char* ssid, const char* password
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
   WiFi.begin(_ssid, _password);
-  startServer();
 }
 
 void SerialWifiInterface::onWiFiEvent(arduino_event_id_t event, arduino_event_info_t info) {
   (void)info;
   if (!_instance) return;
 
-  _instance->_last_wifi_event = millis();
   switch (event) {
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
       _instance->_wifi_disconnected = true;
@@ -119,6 +118,7 @@ void SerialWifiInterface::resetWifi() {
   if (!_managed_wifi || !_ssid || _wifi_reset_in_progress) return;
 
   WIFI_DEBUG_PRINTLN("SerialWifiInterface -> resetting WiFi");
+  _wifi_ready = false;
   stopClient();
   stopServer();
   WiFi.disconnect(true, false);
@@ -140,7 +140,6 @@ void SerialWifiInterface::checkWifiStatus() {
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(true);
     WiFi.begin(_ssid, _password);
-    startServer();
     _wifi_reset_in_progress = false;
     return;
   }
@@ -152,6 +151,7 @@ void SerialWifiInterface::checkWifiStatus() {
 
   if (_wifi_got_ip && isWifiReady()) {
     WIFI_DEBUG_PRINTLN("SerialWifiInterface -> WiFi got IP");
+    _wifi_ready = true;
     _wifi_got_ip = false;
     _wifi_disconnected = false;
     _wifi_lost_ip = false;
@@ -163,6 +163,7 @@ void SerialWifiInterface::checkWifiStatus() {
   }
 
   if (isWifiReady()) {
+    _wifi_ready = true;
     _wifi_disconnected = false;
     _wifi_lost_ip = false;
     _wifi_got_ip = false;
@@ -178,6 +179,7 @@ void SerialWifiInterface::checkWifiStatus() {
     WIFI_DEBUG_PRINTLN("SerialWifiInterface -> WiFi unavailable");
   }
 
+  _wifi_ready = false;
   stopClient();
   stopServer();
 
@@ -242,7 +244,7 @@ void SerialWifiInterface::resetReceivedFrameHeader() {
 
 size_t SerialWifiInterface::checkRecvFrame(uint8_t dest[]) {
   checkWifiStatus();
-  if (_managed_wifi && !isWifiReady()) {
+  if (_managed_wifi && !_wifi_ready) {
     return 0;
   }
 

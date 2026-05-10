@@ -14,6 +14,7 @@ class SerialWifiInterface : public BaseSerialInterface {
   bool _wifi_hard_reset_done;
   bool _wifi_reset_in_progress;
   bool _wifi_events_registered;
+  bool _wifi_ready;
   unsigned long _last_write;
   unsigned long _last_wifi_check;
   unsigned long _wifi_issue_since;
@@ -25,7 +26,6 @@ class SerialWifiInterface : public BaseSerialInterface {
   volatile bool _wifi_disconnected;
   volatile bool _wifi_lost_ip;
   volatile bool _wifi_got_ip;
-  volatile unsigned long _last_wifi_event;
 
   WiFiServer server;
   WiFiClient client;
@@ -71,6 +71,7 @@ public:
     _wifi_hard_reset_done = false;
     _wifi_reset_in_progress = false;
     _wifi_events_registered = false;
+    _wifi_ready = false;
     _last_write = 0;
     _last_wifi_check = 0;
     _wifi_issue_since = 0;
@@ -82,7 +83,6 @@ public:
     _wifi_disconnected = false;
     _wifi_lost_ip = false;
     _wifi_got_ip = false;
-    _last_wifi_event = 0;
     send_queue_len = recv_queue_len = 0;
     received_frame_header.type = 0;
     received_frame_header.length = 0;

@@ -1,9 +1,196 @@
 #include "SerialWifiInterface.h"
 #include <WiFi.h>
 
+#ifndef WIFI_RECOVERY_SANITY_CHECK_INTERVAL
+#define WIFI_RECOVERY_SANITY_CHECK_INTERVAL 60000
+#endif
+#ifndef WIFI_RECOVERY_SOFT_RECONNECT_DELAY
+#define WIFI_RECOVERY_SOFT_RECONNECT_DELAY 15000
+#endif
+#ifndef WIFI_RECOVERY_HARD_RESET_DELAY
+#define WIFI_RECOVERY_HARD_RESET_DELAY 60000
+#endif
+#ifndef WIFI_RECOVERY_HARD_RESET_INTERVAL
+#define WIFI_RECOVERY_HARD_RESET_INTERVAL 60000
+#endif
+#ifndef WIFI_RECOVERY_OFF_TIME
+#define WIFI_RECOVERY_OFF_TIME 100
+#endif
+
+SerialWifiInterface* SerialWifiInterface::_instance = NULL;
+
 void SerialWifiInterface::begin(int port) {
   // wifi setup is handled outside of this class, only starts the server
-  server.begin(port);
+  _port = port;
+  startServer();
+}
+
+void SerialWifiInterface::begin(int port, const char* ssid, const char* password) {
+  _port = port;
+  _ssid = ssid;
+  _password = password;
+  _managed_wifi = true;
+  _wifi_disconnected = false;
+  _wifi_lost_ip = false;
+  _wifi_got_ip = false;
+  _last_wifi_event = 0;
+  _wifi_issue_since = 0;
+  _wifi_reconnect_done = false;
+  _wifi_hard_reset_done = false;
+  _wifi_reset_in_progress = false;
+
+  _instance = this;
+  if (!_wifi_events_registered) {
+    WiFi.onEvent(onWiFiEvent, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+    WiFi.onEvent(onWiFiEvent, ARDUINO_EVENT_WIFI_STA_LOST_IP);
+    WiFi.onEvent(onWiFiEvent, ARDUINO_EVENT_WIFI_STA_GOT_IP);
+    _wifi_events_registered = true;
+  }
+
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.begin(_ssid, _password);
+  startServer();
+}
+
+void SerialWifiInterface::onWiFiEvent(arduino_event_id_t event, arduino_event_info_t info) {
+  (void)info;
+  if (!_instance) return;
+
+  _instance->_last_wifi_event = millis();
+  switch (event) {
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+      _instance->_wifi_disconnected = true;
+      break;
+    case ARDUINO_EVENT_WIFI_STA_LOST_IP:
+      _instance->_wifi_lost_ip = true;
+      break;
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+      _instance->_wifi_got_ip = true;
+      break;
+    default:
+      break;
+  }
+}
+
+bool SerialWifiInterface::hasValidIP() const {
+  IPAddress ip = WiFi.localIP();
+  return ip[0] != 0 || ip[1] != 0 || ip[2] != 0 || ip[3] != 0;
+}
+
+bool SerialWifiInterface::isWifiReady() const {
+  return WiFi.status() == WL_CONNECTED && hasValidIP();
+}
+
+void SerialWifiInterface::stopClient() {
+  if (deviceConnected) {
+    WIFI_DEBUG_PRINTLN("Disconnected");
+  }
+  deviceConnected = false;
+  client.stop();
+  resetReceivedFrameHeader();
+  clearBuffers();
+}
+
+void SerialWifiInterface::startServer() {
+  if (_server_started || _port <= 0) return;
+  server.begin(_port);
+  _server_started = server;
+}
+
+void SerialWifiInterface::stopServer() {
+  if (!_server_started) return;
+  server.end();
+  _server_started = false;
+}
+
+void SerialWifiInterface::reconnectWifi() {
+  if (!_managed_wifi || !_ssid) return;
+
+  WIFI_DEBUG_PRINTLN("SerialWifiInterface -> reconnecting WiFi");
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  if (!WiFi.reconnect()) {
+    WiFi.begin(_ssid, _password);
+  }
+}
+
+void SerialWifiInterface::resetWifi() {
+  if (!_managed_wifi || !_ssid || _wifi_reset_in_progress) return;
+
+  WIFI_DEBUG_PRINTLN("SerialWifiInterface -> resetting WiFi");
+  stopClient();
+  stopServer();
+  WiFi.disconnect(true, false);
+  WiFi.mode(WIFI_OFF);
+  _wifi_reset_restart_time = millis() + WIFI_RECOVERY_OFF_TIME;
+  _wifi_reset_in_progress = true;
+  _last_hard_reset = millis();
+}
+
+void SerialWifiInterface::checkWifiStatus() {
+  if (!_managed_wifi || !_isEnabled) return;
+
+  unsigned long now = millis();
+
+  if (_wifi_reset_in_progress) {
+    if (now < _wifi_reset_restart_time) return;
+
+    WIFI_DEBUG_PRINTLN("SerialWifiInterface -> restarting WiFi");
+    WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(true);
+    WiFi.begin(_ssid, _password);
+    startServer();
+    _wifi_reset_in_progress = false;
+    return;
+  }
+
+  bool saw_event = _wifi_disconnected || _wifi_lost_ip || _wifi_got_ip;
+  bool do_sanity_check = now >= _last_wifi_check + WIFI_RECOVERY_SANITY_CHECK_INTERVAL;
+  if (!saw_event && _wifi_issue_since == 0 && !do_sanity_check) return;
+  if (do_sanity_check) _last_wifi_check = now;
+
+  if (_wifi_got_ip && isWifiReady()) {
+    WIFI_DEBUG_PRINTLN("SerialWifiInterface -> WiFi got IP");
+    _wifi_got_ip = false;
+    _wifi_disconnected = false;
+    _wifi_lost_ip = false;
+    _wifi_issue_since = 0;
+    _wifi_reconnect_done = false;
+    _wifi_hard_reset_done = false;
+    startServer();
+    return;
+  }
+
+  if (isWifiReady()) {
+    _wifi_disconnected = false;
+    _wifi_lost_ip = false;
+    _wifi_got_ip = false;
+    _wifi_issue_since = 0;
+    _wifi_reconnect_done = false;
+    _wifi_hard_reset_done = false;
+    startServer();
+    return;
+  }
+
+  if (_wifi_issue_since == 0) {
+    _wifi_issue_since = now;
+    WIFI_DEBUG_PRINTLN("SerialWifiInterface -> WiFi unavailable");
+  }
+
+  stopClient();
+  stopServer();
+
+  if (!_wifi_reconnect_done && now >= _wifi_issue_since + WIFI_RECOVERY_SOFT_RECONNECT_DELAY) {
+    reconnectWifi();
+    _wifi_reconnect_done = true;
+  }
+
+  if (now >= _wifi_issue_since + WIFI_RECOVERY_HARD_RESET_DELAY
+      && (!_wifi_hard_reset_done || now >= _last_hard_reset + WIFI_RECOVERY_HARD_RESET_INTERVAL)) {
+    resetWifi();
+    _wifi_hard_reset_done = true;
+  }
 }
 
 // ---------- public methods
@@ -16,6 +203,7 @@ void SerialWifiInterface::enable() {
 
 void SerialWifiInterface::disable() {
   _isEnabled = false;
+  stopClient();
 }
 
 size_t SerialWifiInterface::writeFrame(const uint8_t src[], size_t len) {
@@ -53,6 +241,11 @@ void SerialWifiInterface::resetReceivedFrameHeader() {
 }
 
 size_t SerialWifiInterface::checkRecvFrame(uint8_t dest[]) {
+  checkWifiStatus();
+  if (_managed_wifi && !isWifiReady()) {
+    return 0;
+  }
+
   // check if new client connected
   auto newClient = server.available();
   if (newClient) {

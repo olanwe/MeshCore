@@ -195,8 +195,7 @@ void setup() {
 
 #ifdef WIFI_SSID
   board.setInhibitSleep(true);   // prevent sleep when WiFi is active
-  WiFi.begin(WIFI_SSID, WIFI_PWD);
-  serial_interface.begin(TCP_PORT);
+  serial_interface.begin(TCP_PORT, WIFI_SSID, WIFI_PWD);
 #elif defined(BLE_PIN_CODE)
   serial_interface.begin(BLE_NAME_PREFIX, the_mesh.getNodePrefs()->node_name, the_mesh.getBLEPin());
 #elif defined(SERIAL_RX)
